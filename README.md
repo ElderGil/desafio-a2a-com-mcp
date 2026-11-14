@@ -206,7 +206,7 @@ Quando a tool devolve erro de execução, a Task termina em `TASK_STATE_FAILED` 
 Última execução, com os dois processos recém-iniciados. Código de saída 0.
 
 ```
-trace-id desta execucao: 9f7500d2b3f10ddfc6c85b6fabdc2a1f
+trace-id desta execucao: 3c0e32f53928ec483185b40e9fe94408
 procure esse valor no stderr do servidor MCP para conferir a propagacao do traceparent.
 
 PASS 01 tools/list traz as tres tools
@@ -253,11 +253,11 @@ resumo: 36 passaram, 0 falharam, de 36 verificacoes
 O stderr do servidor MCP na mesma execução. O `tools/list` do agente (id 1) vem antes do primeiro `tools/call`, com o trace-id que o validador imprimiu. O par da reserva que passou pela pausa é o id 4 (pedido inicial) e o id 5 (retry).
 
 ```
-[mcp] metodo=tools/list id=1 alvo=- traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-137852e8b9cc8653-01 capabilities={"elicitation":{"form":{},"url":{}}}
-[mcp] metodo=tools/call id=2 alvo=reservar_sala traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-b8a1dbf3adadbf9e-01 capabilities={"elicitation":{"form":{},"url":{}}}
-[mcp] metodo=tools/call id=3 alvo=reservar_sala traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-5a790f5ec290c504-01 capabilities={"elicitation":{"form":{},"url":{}}} retry=sim
-[mcp] metodo=resources/read id=4 alvo=politica://uso traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-46cd5a760650659c-01 capabilities={"elicitation":{"form":{},"url":{}}}
-[mcp] metodo=tools/call id=5 alvo=reservar_sala traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-b38ea196c3594934-01 capabilities={"elicitation":{"form":{},"url":{}}}
+[mcp] metodo=tools/list id=1 alvo=- traceparent=00-3c0e32f53928ec483185b40e9fe94408-4b96a4d24e473fc1-01 capabilities={"elicitation":{"form":{},"url":{}}}
+[mcp] metodo=tools/call id=2 alvo=reservar_sala traceparent=00-3c0e32f53928ec483185b40e9fe94408-dd00b21798a134ef-01 capabilities={"elicitation":{"form":{},"url":{}}}
+[mcp] metodo=resources/read id=3 alvo=politica://uso traceparent=00-3c0e32f53928ec483185b40e9fe94408-bc53f7510d100705-01 capabilities={"elicitation":{"form":{},"url":{}}}
+[mcp] metodo=tools/call id=4 alvo=reservar_sala traceparent=00-3c0e32f53928ec483185b40e9fe94408-600d062a3df5c7af-01 capabilities={"elicitation":{"form":{},"url":{}}}
+[mcp] metodo=tools/call id=5 alvo=reservar_sala traceparent=00-3c0e32f53928ec483185b40e9fe94408-c32be0a58ef7c834-01 capabilities={"elicitation":{"form":{},"url":{}}} retry=sim
 ```
 
 ## Observação: revisão em par com o agent-revisor
@@ -269,6 +269,7 @@ Pedi ao auditor para contestar sete decisões, e não para confirmar. Ele rodou 
 | Marco | Veredito do auditor | O que mudou por causa dele |
 |---|---|---|
 | Entrega | aprovado, com os 13 passos rodados por ele e 4 observações | Aviso de reiniciar os processos antes dos passos manuais; mensagem de erro da Task sem o prefixo do SDK; caminho sem `uv` e expiração do `requestState` executados, em vez de ficarem como "não testado" |
+| Ajustes depois da auditoria | aprovado, 1 observação | O trecho de stderr no fim deste README era de outra execução, com outro trace-id. Troquei pela saída e pelo log da mesma execução |
 
 A observação que mais valeu foi a operacional. O validador deixa as duas alternativas da `sala-garagem` ocupadas, então quem roda os passos manuais logo em seguida vê a Task falhar. O código está certo e o roteiro engana. Eu só tinha testado os passos manuais com processos novos, e não percebi.
 
