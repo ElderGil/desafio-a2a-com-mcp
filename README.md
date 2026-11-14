@@ -70,9 +70,11 @@ Duas coisas para não perder tempo:
 - Rode o validador sempre com os dois processos recém-iniciados. As reservas de uma execução mudam o resultado da seguinte. O `./subir.sh` faz isso: encerra o que estiver escutando nas duas portas e sobe os dois do zero, com o stderr do servidor MCP no terminal e cópia em `logs/`.
 - Para testar o retry depois de um restart, suba o servidor MCP de novo no mesmo terminal. Se a chave mudar, o `requestState` emitido antes deixa de valer, que é o comportamento certo.
 
-Sem `uv`: `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`, e troque `uv run` por `.venv/bin/python`. Esse caminho eu não testei.
+Sem `uv`: `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`, e troque `uv run` por `.venv/bin/python`. Testei num clone limpo: 36 de 36.
 
 ### A ponte na mão
+
+Reinicie os dois processos antes destes comandos se o validador acabou de rodar (`./subir.sh` resolve). O validador reserva a `sala-fusca` e a `sala-mirante` das 14h às 15h, que são justamente as alternativas da `sala-garagem`. Sem reiniciar, o pedido abaixo termina em `TASK_STATE_FAILED` com "Sem alternativas disponiveis no intervalo", que é a resposta certa para aquele estado, mas não é o que você quer conferir.
 
 ```bash
 curl -s http://localhost:7300/.well-known/agent-card.json
@@ -115,7 +117,7 @@ sequenceDiagram
     A-->>C: Task COMPLETED + artifact "reserva"
 ```
 
-**O `input_required` do MCP vira `TASK_STATE_INPUT_REQUIRED`** em `agente/ponte.py:110-123`, dentro de `_aplicar`. O `requestState` fica na Task; para o cliente A2A sai só a linha de alternativas.
+**O `input_required` do MCP vira `TASK_STATE_INPUT_REQUIRED`** em `agente/ponte.py:119-132`, dentro de `_aplicar`. O `requestState` fica na Task; para o cliente A2A sai só a linha de alternativas.
 
 ```python
 task.pausa = Pausa(
@@ -127,7 +129,7 @@ task.pausa = Pausa(
 task.responder(INPUT_REQUIRED, _linha_de_alternativas(task.pausa))
 ```
 
-**O `requestState` volta para o servidor** em `agente/ponte.py:82-90`, dentro de `continuar`. Mesma tool, mesmos argumentos, a mesma chave que veio no `inputRequests` e o valor ecoado sem abrir. É um request JSON-RPC novo, com id novo.
+**O `requestState` volta para o servidor** em `agente/ponte.py:91-99`, dentro de `continuar`. Mesma tool, mesmos argumentos, a mesma chave que veio no `inputRequests` e o valor ecoado sem abrir. É um request JSON-RPC novo, com id novo.
 
 ```python
 await _chamar(
@@ -157,7 +159,7 @@ request_state_security=RequestStateSecurity(keys=[chave_de_integridade()], ttl=V
 
 A tool escreve e lê texto claro. O SDK sela na saída e verifica na volta com AES-256-GCM, com a chave derivada de `REQUEST_STATE_SECRET`. O selo também amarra o token ao método, à tool, a um digest dos argumentos e ao nome do servidor. Trocar um caractere, deixar expirar ou reenviar com outros argumentos dá o mesmo resultado: `-32602` com "Invalid or expired requestState", antes de chegar na tool. O servidor não sobe sem a variável ou com menos de 32 bytes (`servidor.py:48-55`), e não existe chave no código.
 
-Vale por 15 minutos, dentro da faixa de 5 a 30 pedida.
+Vale por 15 minutos, dentro da faixa de 5 a 30 pedida. Para ver a expiração sem esperar, rodei uma cópia do servidor com validade de 3 segundos: o retry imediato conclui, e o retry depois de 5 segundos devolve o mesmo `-32602`, com `requestState rejected on tools/call: expired` no log.
 
 ### O que viaja nele
 
@@ -197,12 +199,14 @@ Num dicionário em memória no agente (`Tarefas`, `agente/tasks.py:86`). Reinici
 
 O binding JSON-RPC deste desafio são dois métodos e um GET. Escrevi direto em Starlette, e assim a ordem dos estados e a leitura do header `traceparent` ficam à vista. Mensagem para Task em estado terminal devolve `-32004` (`agente/app.py:107`). Task que não existe, `-32001`. Pedido fora do formato fixo, `-32602`, sem abrir Task: erro de contrato falha o request, falta de contexto de negócio pausa a Task.
 
+Quando a tool devolve erro de execução, a Task termina em `TASK_STATE_FAILED` com a mensagem da tool, sem o prefixo `Error executing tool reservar_sala:` que o SDK do servidor acrescenta (`agente/ponte.py`, `_mensagem_da_tool`). Para quem chama, o agente é opaco: o cliente A2A não precisa saber que existe uma tool atrás dele.
+
 ## Saída do validador
 
 Última execução, com os dois processos recém-iniciados. Código de saída 0.
 
 ```
-trace-id desta execucao: d77637411ed91d9e1640b728acd21e14
+trace-id desta execucao: 9f7500d2b3f10ddfc6c85b6fabdc2a1f
 procure esse valor no stderr do servidor MCP para conferir a propagacao do traceparent.
 
 PASS 01 tools/list traz as tres tools
@@ -249,9 +253,23 @@ resumo: 36 passaram, 0 falharam, de 36 verificacoes
 O stderr do servidor MCP na mesma execução. O `tools/list` do agente (id 1) vem antes do primeiro `tools/call`, com o trace-id que o validador imprimiu. O par da reserva que passou pela pausa é o id 4 (pedido inicial) e o id 5 (retry).
 
 ```
-[mcp] metodo=tools/list id=1 alvo=- traceparent=00-d77637411ed91d9e1640b728acd21e14-20873286c37489e7-01 capabilities={"elicitation":{"form":{},"url":{}}}
-[mcp] metodo=tools/call id=2 alvo=reservar_sala traceparent=00-d77637411ed91d9e1640b728acd21e14-63bff7576de27926-01 capabilities={"elicitation":{"form":{},"url":{}}}
-[mcp] metodo=resources/read id=3 alvo=politica://uso traceparent=00-d77637411ed91d9e1640b728acd21e14-357a1ff5f2697ded-01 capabilities={"elicitation":{"form":{},"url":{}}}
-[mcp] metodo=tools/call id=4 alvo=reservar_sala traceparent=00-d77637411ed91d9e1640b728acd21e14-939c45cadcb63cd1-01 capabilities={"elicitation":{"form":{},"url":{}}}
-[mcp] metodo=tools/call id=5 alvo=reservar_sala traceparent=00-d77637411ed91d9e1640b728acd21e14-3b82adf2b73c090b-01 capabilities={"elicitation":{"form":{},"url":{}}} retry=sim
+[mcp] metodo=tools/list id=1 alvo=- traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-137852e8b9cc8653-01 capabilities={"elicitation":{"form":{},"url":{}}}
+[mcp] metodo=tools/call id=2 alvo=reservar_sala traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-b8a1dbf3adadbf9e-01 capabilities={"elicitation":{"form":{},"url":{}}}
+[mcp] metodo=tools/call id=3 alvo=reservar_sala traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-5a790f5ec290c504-01 capabilities={"elicitation":{"form":{},"url":{}}} retry=sim
+[mcp] metodo=resources/read id=4 alvo=politica://uso traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-46cd5a760650659c-01 capabilities={"elicitation":{"form":{},"url":{}}}
+[mcp] metodo=tools/call id=5 alvo=reservar_sala traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-b38ea196c3594934-01 capabilities={"elicitation":{"form":{},"url":{}}}
 ```
+
+## Observação: revisão em par com o agent-revisor
+
+Esta entrega passou pelo processo de revisão que eu idealizei e uso nos meus projetos, o [agent-revisor](https://github.com/ElderGil/agent-revisor). A regra dele é uma só: quem constrói não dá veredito sobre o próprio trabalho. O Claude Code construiu, o Antigravity auditou e eu decidi no portão.
+
+Pedi ao auditor para contestar sete decisões, e não para confirmar. Ele rodou os 13 passos do fluxo do avaliador num clone limpo, conferiu as 12 referências de arquivo e linha deste README e renderizou o diagrama.
+
+| Marco | Veredito do auditor | O que mudou por causa dele |
+|---|---|---|
+| Entrega | aprovado, com os 13 passos rodados por ele e 4 observações | Aviso de reiniciar os processos antes dos passos manuais; mensagem de erro da Task sem o prefixo do SDK; caminho sem `uv` e expiração do `requestState` executados, em vez de ficarem como "não testado" |
+
+A observação que mais valeu foi a operacional. O validador deixa as duas alternativas da `sala-garagem` ocupadas, então quem roda os passos manuais logo em seguida vê a Task falhar. O código está certo e o roteiro engana. Eu só tinha testado os passos manuais com processos novos, e não percebi.
+
+Fato é, o auditor também erra. A primeira execução do script dele falhou num passo que estava certo: ele contou a chamada direta do validador como se fosse o primeiro `tools/call` do agente, e concluiu que o `tools/list` vinha depois. Corrigiu o script e rodou de novo. O veredito cita só a execução que passou, e a que falhou está nos logs. Conferi as duas antes de decidir.

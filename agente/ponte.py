@@ -25,6 +25,7 @@ RECUSAR = "recusar"
 
 _PEDIDO = re.compile(r"^reservar\s+sala=(?P<sala>\S+)\s+inicio=(?P<inicio>\S+)\s+fim=(?P<fim>\S+)\s+responsavel=(?P<responsavel>.+)$")
 _ESCOLHA = re.compile(r"^escolha=(?P<valor>\S+)$")
+_PREFIXO_DO_SDK = re.compile(r"^Error executing tool \S+: ")
 
 FORMATO_DO_PEDIDO = "reservar sala=<id> inicio=<iso8601> fim=<iso8601> responsavel=<nome>"
 
@@ -53,6 +54,14 @@ def _linha_de_alternativas(pausa: Pausa) -> str:
 
 def _texto(resultado: types.CallToolResult) -> str:
     return " ".join(bloco.text for bloco in resultado.content if isinstance(bloco, types.TextContent))
+
+
+def _mensagem_da_tool(resultado: types.CallToolResult) -> str:
+    """A mensagem de erro como a tool a escreveu, sem o prefixo que o SDK do servidor poe.
+
+    Para o cliente A2A o agente e opaco: ele nao precisa saber que existe uma tool atras.
+    """
+    return _PREFIXO_DO_SDK.sub("", _texto(resultado), count=1)
 
 
 async def iniciar(task: Task, argumentos: dict[str, str], mcp: ClienteMCP) -> None:
@@ -123,7 +132,7 @@ async def _aplicar(
         return
 
     if resultado.is_error:
-        task.responder(FAILED, _texto(resultado))
+        task.responder(FAILED, _mensagem_da_tool(resultado))
         return
 
     dados = resultado.structured_content or {}
