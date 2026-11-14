@@ -1,52 +1,78 @@
 # A Ponte: um agente A2A com MCP por dentro
 
-Entrega do desafio da Hill Valley Tech. São dois processos:
+Desafio de protocolos do MBA em Engenharia de Software com IA da Full Cycle. Este repositório é um fork de [devfullcycle/desafio-a2a-com-mcp](https://github.com/devfullcycle/desafio-a2a-com-mcp), onde está o enunciado original.
 
-- `servidor-mcp/`: servidor MCP em Streamable HTTP (porta 7301, `/mcp`), sem sessão, com as tools `listar_salas`, `consultar_disponibilidade` e `reservar_sala`, o resource `politica://uso` e o ciclo de MRTR na reserva.
-- `agente/`: agente que é host MCP por dentro e servidor A2A v1.0 por fora (porta 7300, `/a2a`). Não usa LLM: interpreta o pedido em formato fixo e traduz protocolo.
+O domínio é bobo de propósito: cinco salas de reunião e três regras de uso. O difícil é o estado. Nem o MCP nem o A2A têm sessão, e os dois resolvem isso de jeitos diferentes. O MCP devolve um `requestState` ao cliente e espera ele de volta no retry. O A2A tem a Task, com identidade e estado. Quando a sala pedida está ocupada, esses dois mecanismos precisam se encontrar dentro do agente.
 
-Stack: Python 3.12, SDK oficial `mcp` 2.3.0 (spec 2026-07-28) e Starlette. Versões travadas em `pyproject.toml` e `uv.lock`.
+## Minha implementação
+
+Dois processos em Python 3.12: um servidor MCP em Streamable HTTP sem sessão (porta 7301) e um agente que consome esse servidor por dentro e se oferece como servidor A2A v1.0 por fora (porta 7300). As decisões que valem registro:
+
+- **O agente traduz protocolo e não sabe nada de sala.** Conflito, política e alternativas são decisão do servidor MCP. O agente só decide o que cada resposta dele significa para a Task.
+- **Sem LLM no caminho.** O pedido chega em formato fixo e o mesmo pedido dá sempre o mesmo resultado.
+- **O estado da pausa viaja, não fica guardado.** O pedido e as alternativas vão dentro do `requestState`, selado pelo SDK com AES-256-GCM. Um retry depois de reiniciar o servidor conclui a reserva.
+- **O agente vê o `input_required` cru.** A chamada sai pelo nível de sessão do SDK, então quem responde a pergunta é o cliente A2A, e não um callback.
+- **O `requestState` nunca sai do agente.** Fica preso à Task e não entra em nenhuma resposta A2A.
+- **Validador do desafio: 36 de 36**, e os passos manuais do avaliador que ele não cobre (restart, adulteração e capability ausente) conferidos à parte.
+
+| Arquivo | O que tem |
+|---|---|
+| `servidor-mcp/servidor.py` | As três tools, o resource, o ciclo de MRTR e o log de cada request no stderr |
+| `servidor-mcp/dominio.py` | Salas, reservas, política e a regra das alternativas. Não conhece MCP. |
+| `agente/app.py` | Agent Card, `SendMessage` e `GetTask` |
+| `agente/ponte.py` | A costura entre os dois protocolos |
+| `agente/tasks.py` | A Task e o que fica guardado quando ela pausa |
+| `agente/cliente_mcp.py` | O cliente MCP: descoberta, política, `tools/call` e `traceparent` |
+
+Nenhum arquivo do agente importa código do servidor.
 
 ## Como rodar
 
-Pré-requisitos: [uv](https://docs.astral.sh/uv/) e Python 3.10+ no sistema para o validador. O `uv` baixa o Python 3.12 do projeto sozinho.
+### Pré-requisitos
+
+- [uv](https://docs.astral.sh/uv/). Ele baixa o Python 3.12 fixado em `.python-version` se for preciso.
+- Python 3.10 ou superior no sistema, para o validador.
+- Nenhum serviço externo e nenhuma chave de API.
+
+### Variáveis
+
+| Variável | Obrigatória | O que é |
+|---|---|---|
+| `REQUEST_STATE_SECRET` | sim, no servidor MCP | Chave que protege o `requestState`. No mínimo 32 bytes. |
+| `MCP_HOST`, `MCP_PORT` | não | Onde o servidor MCP escuta. Padrão: `127.0.0.1` e `7301` |
+| `AGENTE_HOST`, `AGENTE_PORT` | não | Onde o agente escuta. Padrão: `127.0.0.1` e `7300` |
+| `AGENTE_URL` | não | URL publicada no Agent Card. Padrão: `http://127.0.0.1:7300` |
+| `MCP_URL` | não | Endpoint MCP que o agente chama. Padrão: `http://127.0.0.1:7301/mcp` |
+
+### Comandos
 
 ```bash
-git clone <url-deste-repositorio> a-ponte && cd a-ponte
-uv sync
+git clone https://github.com/ElderGil/desafio-a2a-com-mcp.git && cd desafio-a2a-com-mcp
+uv sync                     # instala as dependências, com mcp==2.3.0 fixado
 ```
 
-Gere a chave que protege o `requestState` e exporte-a **nos terminais onde o servidor MCP vai rodar**. Ela precisa ter pelo menos 32 bytes e ser a mesma entre reinícios do servidor, senão um `requestState` emitido antes do restart deixa de ser aceito.
+Gere a chave e exporte no terminal do servidor MCP. O valor não vai para o repositório.
 
 ```bash
 export REQUEST_STATE_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 ```
 
-Terminal 1, servidor MCP (o stderr mostra método, id, `traceparent` e capabilities de cada request):
-
 ```bash
-uv run servidor-mcp/servidor.py
+uv run servidor-mcp/servidor.py     # terminal 1: servidor MCP em http://localhost:7301/mcp
+uv run agente/app.py                # terminal 2: agente em http://localhost:7300/a2a
+python3 validador/validar.py --agente http://localhost:7300 --mcp http://localhost:7301   # terminal 3
 ```
 
-Terminal 2, agente:
+O stderr do servidor MCP mostra uma linha por request, com método, id, `traceparent` e capabilities. É o instrumento de depuração deste desafio.
 
-```bash
-uv run agente/app.py
-```
+Duas coisas para não perder tempo:
 
-Terminal 3, validador (sempre com os dois processos recém-iniciados; as reservas de uma execução mudam o resultado da seguinte):
+- Rode o validador sempre com os dois processos recém-iniciados. As reservas de uma execução mudam o resultado da seguinte. O `./subir.sh` faz isso: encerra o que estiver escutando nas duas portas e sobe os dois do zero, com o stderr do servidor MCP no terminal e cópia em `logs/`.
+- Para testar o retry depois de um restart, suba o servidor MCP de novo no mesmo terminal. Se a chave mudar, o `requestState` emitido antes deixa de valer, que é o comportamento certo.
 
-```bash
-python3 validador/validar.py --agente http://localhost:7300 --mcp http://localhost:7301
-```
+Sem `uv`: `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`, e troque `uv run` por `.venv/bin/python`. Esse caminho eu não testei.
 
-Atalho: `./subir.sh` encerra o que estiver nas duas portas e sobe os dois processos do zero, com o stderr do servidor MCP no terminal e cópias em `logs/`.
-
-Sem `uv`: `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`, e troque `uv run` por `.venv/bin/python`.
-
-Variáveis opcionais, com os padrões do enunciado: `MCP_HOST` (127.0.0.1), `MCP_PORT` (7301), `AGENTE_HOST` (127.0.0.1), `AGENTE_PORT` (7300), `AGENTE_URL` (URL publicada no Agent Card, `http://127.0.0.1:7300`) e `MCP_URL` (`http://127.0.0.1:7301/mcp`).
-
-Teste manual da ponte, com os corpos de `exemplos/wire/`:
+### A ponte na mão
 
 ```bash
 curl -s http://localhost:7300/.well-known/agent-card.json
@@ -67,33 +93,91 @@ curl -s http://localhost:7300/a2a -H 'Content-Type: application/json' \
 
 ## Onde a ponte acontece
 
-Toda a costura está em `agente/ponte.py`.
+Toda a costura está em `agente/ponte.py`. O fluxo de uma sala ocupada:
 
-O `input_required` do MCP vira `TASK_STATE_INPUT_REQUIRED` na função `_aplicar`: quando o resultado do `tools/call` é um `InputRequiredResult`, ela guarda na Task um objeto `Pausa` (o `requestState`, a chave do `inputRequests`, as alternativas na ordem do `enum` e os argumentos originais) e chama `task.responder(INPUT_REQUIRED, "alternativas: ...")`. O agente só enxerga esse resultado cru porque `agente/cliente_mcp.py` chama a tool pelo nível de sessão do SDK com `allow_input_required=True`; o `Client.call_tool` comum responderia a elicitation sozinho e a Task nunca pausaria.
+```mermaid
+sequenceDiagram
+    participant C as Cliente A2A
+    participant A as Agente
+    participant M as Servidor MCP
 
-O `requestState` volta para o servidor na função `continuar`: ela valida `escolha=<valor>` contra as alternativas da `Pausa`, monta a resposta da elicitation (`accept` com a sala, ou `decline` para `escolha=recusar`) e repete o mesmo `tools/call` com `input_responses={pausa.chave: resposta}` e `request_state=pausa.request_state`, sem abrir nem modificar o valor. É um request JSON-RPC novo, com id novo, e leva o mesmo trace-id da Task.
+    C->>A: SendMessage "reservar sala=sala-garagem ..."
+    Note over A: Task SUBMITTED, depois WORKING
+    A->>M: tools/call reservar_sala (id 4)
+    M-->>A: input_required + elicitation + requestState
+    Note over A: guarda o requestState na Task
+    A-->>C: Task INPUT_REQUIRED "alternativas: sala-fusca, sala-mirante"
+    C->>A: SendMessage taskId + "escolha=sala-fusca"
+    Note over A: Task WORKING
+    A->>M: tools/call reservar_sala (id 5) + inputResponses + requestState
+    M-->>A: complete, reserva criada
+    A->>M: resources/read politica://uso
+    A-->>C: Task COMPLETED + artifact "reserva"
+```
 
-Do outro lado, em `servidor-mcp/servidor.py`, `_perguntar` é onde o servidor termina a resposta pedindo a escolha, e `_retomar` é onde ele reconstrói o pedido a partir do `requestState` e conclui.
+**O `input_required` do MCP vira `TASK_STATE_INPUT_REQUIRED`** em `agente/ponte.py:110-123`, dentro de `_aplicar`. O `requestState` fica na Task; para o cliente A2A sai só a linha de alternativas.
 
-O `requestState` não sai do agente: `Task.para_wire` (`agente/tasks.py`) serializa `id`, `contextId`, `status`, `history` e `artifacts`, e não a `Pausa`.
+```python
+task.pausa = Pausa(
+    request_state=resultado.request_state,
+    chave=chave,
+    alternativas=_alternativas(pedido),
+    argumentos=argumentos,
+)
+task.responder(INPUT_REQUIRED, _linha_de_alternativas(task.pausa))
+```
+
+**O `requestState` volta para o servidor** em `agente/ponte.py:82-90`, dentro de `continuar`. Mesma tool, mesmos argumentos, a mesma chave que veio no `inputRequests` e o valor ecoado sem abrir. É um request JSON-RPC novo, com id novo.
+
+```python
+await _chamar(
+    task,
+    pausa.argumentos,
+    mcp,
+    input_responses={pausa.chave: resposta},
+    request_state=pausa.request_state,
+)
+```
+
+`agente/cliente_mcp.py:97`: o agente só enxerga o `input_required` cru porque a chamada sai pelo nível de sessão do SDK com `allow_input_required=True`. O `Client.call_tool` comum responderia a elicitation sozinho, o ciclo fecharia dentro do cliente e a Task nunca pausaria.
+
+`agente/tasks.py:73-83`: `para_wire` é a única saída da Task para o cliente A2A, e ela serializa `id`, `contextId`, `status`, `history` e `artifacts`. A pausa não está na lista, então o `requestState` não tem como vazar.
+
+Do outro lado, em `servidor-mcp/servidor.py`: `_perguntar` (`:136`) é onde o servidor termina a resposta pedindo a escolha, e `_retomar` (`:165`) é onde ele reconstrói o pedido a partir do `requestState` e conclui.
 
 ## Decisões técnicas
 
-**Proteção do `requestState`.** Usei o utilitário do SDK, `RequestStateSecurity(keys=[...], ttl=900)`, configurado no `MCPServer`. A tool escreve e lê texto claro; o SDK sela na saída e verifica na volta com AES-256-GCM (AEAD), com a chave derivada de `REQUEST_STATE_SECRET` por HKDF-SHA256. Além da integridade, o selo amarra o token ao método, ao nome da tool, a um digest dos argumentos e ao nome do servidor. Qualquer falha (adulteração, expiração, argumentos diferentes no retry) é rejeitada com `-32602` "Invalid or expired requestState" antes de chegar na tool. O servidor não sobe se a variável faltar ou tiver menos de 32 bytes, e não existe chave no código.
+### Como o `requestState` é protegido
 
-**Validade.** 15 minutos (`VALIDADE_DO_REQUEST_STATE`), dentro da faixa de 5 a 30 pedida.
+`servidor-mcp/servidor.py:63`: usei o utilitário do SDK, sem criptografia própria.
 
-**O que viaja no `requestState`.** O pedido original (sala, início, fim, responsável) e as alternativas oferecidas. O servidor não guarda nada entre o `input_required` e o retry, então um retry depois de um restart conclui a reserva. No retry valem os valores selados; a escolha precisa estar entre as alternativas seladas.
+```python
+request_state_security=RequestStateSecurity(keys=[chave_de_integridade()], ttl=VALIDADE_DO_REQUEST_STATE),
+```
 
-**Por que a forma manual do MRTR e não `Resolve`/`Elicit`.** A primeira versão usava o resolver do SDK, e passava no validador. Mas o SDK só aceita a resposta se a pergunta, renderizada de novo no retry, for idêntica à que foi selada. Como as alternativas dependem das reservas em memória, um restart do servidor mudava a pergunta e o retry devolvia outro `input_required` em vez de concluir. Com a tool devolvendo o `InputRequiredResult` ela mesma, as alternativas ficam dentro do estado selado e o restart deixa de importar. O custo foi escrever a checagem de capability (`_exigir_elicitation_em_form`, erro `-32021`), que o resolver fazia sozinho.
+A tool escreve e lê texto claro. O SDK sela na saída e verifica na volta com AES-256-GCM, com a chave derivada de `REQUEST_STATE_SECRET`. O selo também amarra o token ao método, à tool, a um digest dos argumentos e ao nome do servidor. Trocar um caractere, deixar expirar ou reenviar com outros argumentos dá o mesmo resultado: `-32602` com "Invalid or expired requestState", antes de chegar na tool. O servidor não sobe sem a variável ou com menos de 32 bytes (`servidor.py:48-55`), e não existe chave no código.
 
-**Estado das Tasks.** Dicionário em memória no agente (`Tarefas` em `agente/tasks.py`). Reiniciar o agente perde as Tasks, o que o enunciado permite. A pausa é por Task, então duas Tasks pausadas ao mesmo tempo não trocam de `requestState`.
+Vale por 15 minutos, dentro da faixa de 5 a 30 pedida.
 
-**A2A sem SDK.** O binding JSON-RPC do desafio são dois métodos e um GET, escritos direto em Starlette. Assim a ordem dos estados (`SUBMITTED` → `WORKING` → terminal ou `INPUT_REQUIRED`) e a leitura do header `traceparent` ficam explícitas. Mensagem para Task em estado terminal devolve erro `-32004`; Task inexistente, `-32001`; pedido fora do formato fixo, `-32602`, sem abrir Task.
+### O que viaja nele
 
-**Regra de negócio só no servidor MCP.** O agente não sabe o que é conflito, política ou alternativa. Ele lê o `enum` da elicitation para validar a escolha e a versão da política pelo resource `politica://uso`; todo o resto vem das respostas do servidor.
+`servidor-mcp/servidor.py:156`: o pedido original e as alternativas oferecidas.
 
-**Limitação do SDK: capability declarada.** O enunciado pede `{"elicitation": {"form": {}}}`. O cliente do SDK Python 2.3.0 anuncia `{"elicitation": {"form": {}, "url": {}}}` sempre que um callback de elicitation é registrado, e não há opção para declarar só o form mode. Trecho de `mcp/client/session.py`, em `_build_capabilities`:
+```python
+estado = {"pergunta": CHAVE_DA_PERGUNTA, "pedido": pedido, "alternativas": alternativas}
+```
+
+O servidor não guarda nada entre o `input_required` e o retry. No retry valem os valores selados, e a escolha precisa estar entre as alternativas seladas.
+
+### Duas coisas que só descobri rodando
+
+A primeira versão do servidor usava `Resolve` e `Elicit`, o caminho que a documentação do SDK recomenda: um resolver devolve a pergunta e o SDK monta o `input_required` sozinho. Passou nas 36 verificações do validador. Choque de realidade: falhou no passo 12 do fluxo do avaliador, o do retry depois de um restart.
+
+O motivo é que o SDK só aceita a resposta se a pergunta, renderizada de novo no retry, for idêntica à que foi selada. As alternativas dependem das reservas em memória. Se uma alternativa foi reservada antes da pausa, ela não entra na pergunta. Depois do restart as reservas voltam ao estado inicial, a lista muda, e o servidor pergunta de novo em vez de concluir. O validador não pega porque não reinicia nada.
+
+Por isso `reservar_sala` devolve o `InputRequiredResult` ela mesma, e as alternativas viajam dentro do estado selado. O custo foi escrever a checagem de capability que o resolver fazia sozinho (`_exigir_elicitation_em_form`, `servidor.py:191`, erro `-32021`).
+
+A segunda: o cliente do SDK não declara só o form mode. O enunciado pede `{"elicitation": {"form": {}}}` e o cliente Python 2.3.0 anuncia `form` e `url` sempre que existe um callback de elicitation registrado. Está em `mcp/client/session.py`, em `_build_capabilities`:
 
 ```python
 elicitation = (
@@ -103,11 +187,19 @@ elicitation = (
 )
 ```
 
-Tentei sobrepor a chave `io.modelcontextprotocol/clientCapabilities` no `_meta` do request e o SDK carimba o valor dele por cima. A capability de form mode é declarada em todo request, como o critério exige; o `url` vem a mais. Preferi manter o cliente oficial a reescrever o transporte só para remover esse campo. O stderr do servidor MCP mostra as capabilities recebidas em cada request.
+Tentei sobrepor a chave `io.modelcontextprotocol/clientCapabilities` no `_meta` de cada request, e o SDK carimba o valor dele por cima. É uma limitação real do SDK. O form mode é declarado em todo request, que é o que o critério de aceite exige, e o `url` vem a mais. Preferi manter o cliente oficial a reescrever o transporte para tirar um campo. O stderr do servidor MCP mostra as capabilities recebidas em cada request.
+
+### Onde ficam as Tasks
+
+Num dicionário em memória no agente (`Tarefas`, `agente/tasks.py:86`). Reiniciar o agente perde as Tasks, o que o enunciado permite. O que precisa sobreviver a um restart é o `requestState`, e ele sobrevive porque o estado viaja nele e não no servidor. A pausa é por Task, então duas Tasks pausadas ao mesmo tempo não trocam de `requestState`.
+
+### A2A sem SDK
+
+O binding JSON-RPC deste desafio são dois métodos e um GET. Escrevi direto em Starlette, e assim a ordem dos estados e a leitura do header `traceparent` ficam à vista. Mensagem para Task em estado terminal devolve `-32004` (`agente/app.py:107`). Task que não existe, `-32001`. Pedido fora do formato fixo, `-32602`, sem abrir Task: erro de contrato falha o request, falta de contexto de negócio pausa a Task.
 
 ## Saída do validador
 
-Última execução, com os dois processos recém-iniciados (código de saída 0):
+Última execução, com os dois processos recém-iniciados. Código de saída 0.
 
 ```
 trace-id desta execucao: d77637411ed91d9e1640b728acd21e14
@@ -154,7 +246,7 @@ PASS 36 o agente e deterministico: o mesmo pedido produz a mesma pausa
 resumo: 36 passaram, 0 falharam, de 36 verificacoes
 ```
 
-No stderr do servidor MCP da mesma execução, o `tools/list` do agente (id 1) aparece antes do primeiro `tools/call`, com o trace-id do validador. O par da reserva que passou pela pausa é o id 4 (pedido inicial) e o id 5 (retry, marcado com `retry=sim`):
+O stderr do servidor MCP na mesma execução. O `tools/list` do agente (id 1) vem antes do primeiro `tools/call`, com o trace-id que o validador imprimiu. O par da reserva que passou pela pausa é o id 4 (pedido inicial) e o id 5 (retry).
 
 ```
 [mcp] metodo=tools/list id=1 alvo=- traceparent=00-d77637411ed91d9e1640b728acd21e14-20873286c37489e7-01 capabilities={"elicitation":{"form":{},"url":{}}}
